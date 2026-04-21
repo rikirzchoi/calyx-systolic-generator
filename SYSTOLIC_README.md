@@ -1,6 +1,28 @@
 # Calyx Systolic Array Generator
 
-A research project built on top of the [Calyx](https://calyxir.org) hardware compiler infrastructure. Starting from a naive software-style matrix multiply, we progressively optimize it into a statically-scheduled, pipelined systolic array — all expressed in Calyx IR and verified with Verilator cycle-accurate simulation.
+> **Based on the [Calyx compiler infrastructure](https://github.com/calyxir/calyx)** developed by the CAPRA research group at Cornell University. This repo contains the original Calyx compiler source unchanged — my own work is layered on top of it and is described below.
+
+A research project built on top of the [Calyx](https://calyxir.org) hardware compiler infrastructure. Starting from a naive software-style matrix multiply, I progressively optimized it into a statically-scheduled, pipelined systolic array — all expressed in Calyx IR and verified with Verilator cycle-accurate simulation.
+
+## My Contributions
+
+The files I authored are:
+
+| File | Description |
+|------|-------------|
+| `matmul.futil` | Naive 4×4 matrix multiplier written in Calyx IR (Phase 2 baseline) |
+| `gen_systolic.py` | Python script that generates a pipelined 4×4 systolic array in Calyx IR |
+| `systolic.futil` | Generated systolic array output (produced by `gen_systolic.py`) |
+| `gen_data.py` | Generates simulation input data with pre-skewed memories |
+| `data.json` | Input matrices for the matmul simulation |
+| `data_systolic.json` | Pre-skewed input memories for the systolic simulation |
+| `out.json` | Matmul simulation output (cycles: 804) |
+| `out_systolic.json` | Systolic simulation output (cycles: 55) |
+| `SYSTOLIC_README.md` | This file |
+
+Everything else in the repo is the upstream Calyx compiler infrastructure, used as-is.
+
+---
 
 ---
 
