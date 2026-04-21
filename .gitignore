@@ -51,6 +51,12 @@ results.xml
 .fud2*/
 
 
+# project data / simulation output files
+!data.json
+!data_systolic.json
+!out.json
+!out_systolic.json
+
 !cider/dap/calyxDebug/package.json
 !cider/dap/calyxDebug/tsconfig.json
 !frontends/queues/tests/compiler/jsons/complex_tree.json

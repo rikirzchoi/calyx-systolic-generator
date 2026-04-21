@@ -1,0 +1,290 @@
+import "primitives/core.futil";
+import "primitives/binary_operators.futil";
+import "primitives/memories/seq.futil";
+import "primitives/unsynthesizable.futil";
+
+// ─────────────────────────────────────────────────────────────────────
+// MAC Processing Element (pipelined, static latency = 1 cycle)
+//   • std_unsyn_mult: combinational multiply (non-synthesisable)
+//   • mult_reg:       pipeline register breaks mult→add critical path
+//   • r_fwd / d_fwd:  registered forwarding (left→right, top→bottom)
+//   • acc:            running accumulator
+//   • result:         continuous output so main can read final value
+// ─────────────────────────────────────────────────────────────────────
+static<1> component mac_pe(top: 32, left: 32)
+    -> (bottom: 32, right: 32, result: 32) {
+  cells {
+    acc      = std_reg(32);
+    mult_reg = std_reg(32);
+    r_fwd    = std_reg(32);
+    d_fwd    = std_reg(32);
+    add      = std_add(32);
+    mult     = std_unsyn_mult(32);
+  }
+  wires {
+    static<1> group step {
+      // Stage 1: latch multiply result into pipeline register
+      mult.left          = top;
+      mult.right         = left;
+      mult_reg.in        = mult.out;
+      mult_reg.write_en  = %0 ? 1'd1;
+      // Stage 2: accumulate from pipeline register (breaks critical path)
+      add.left           = mult_reg.out;
+      add.right          = acc.out;
+      acc.in             = add.out;
+      acc.write_en       = %0 ? 1'd1;
+      // Register forwarding: propagate inputs to outputs next cycle
+      r_fwd.in         = left;
+      r_fwd.write_en   = %0 ? 1'd1;
+      d_fwd.in         = top;
+      d_fwd.write_en   = %0 ? 1'd1;
+    }
+    // Continuous: output registered values to neighbours
+    bottom = d_fwd.out;
+    right  = r_fwd.out;
+    result = acc.out;
+  }
+  control {
+    static seq { step; }
+  }
+}
+
+component main() -> () {
+  cells {
+    // Pre-skewed A rows (size 8 = 4 data + 3 skew zeros + 1 pad)
+    @external A0 = seq_mem_d1(32, 16, 4);
+    @external A1 = seq_mem_d1(32, 16, 4);
+    @external A2 = seq_mem_d1(32, 16, 4);
+    @external A3 = seq_mem_d1(32, 16, 4);
+    // Pre-skewed B columns
+    @external B0 = seq_mem_d1(32, 16, 4);
+    @external B1 = seq_mem_d1(32, 16, 4);
+    @external B2 = seq_mem_d1(32, 16, 4);
+    @external B3 = seq_mem_d1(32, 16, 4);
+    // Output memories: C_i stores row i of the result
+    @external C0 = seq_mem_d1(32, 4, 2);
+    @external C1 = seq_mem_d1(32, 4, 2);
+    @external C2 = seq_mem_d1(32, 4, 2);
+    @external C3 = seq_mem_d1(32, 4, 2);
+    // 4×4 PE grid
+    pe_00 = mac_pe();
+    pe_01 = mac_pe();
+    pe_02 = mac_pe();
+    pe_03 = mac_pe();
+    pe_10 = mac_pe();
+    pe_11 = mac_pe();
+    pe_12 = mac_pe();
+    pe_13 = mac_pe();
+    pe_20 = mac_pe();
+    pe_21 = mac_pe();
+    pe_22 = mac_pe();
+    pe_23 = mac_pe();
+    pe_30 = mac_pe();
+    pe_31 = mac_pe();
+    pe_32 = mac_pe();
+    pe_33 = mac_pe();
+    steps     = std_reg(4);
+    steps_add = std_add(4);
+    lt15      = std_lt(4);
+  }
+  wires {
+    // Condition: steps < 15  (extra cycle flushes the mult_reg pipeline stage)
+    comb group cond_steps {
+      lt15.left  = steps.out;
+      lt15.right = 4'd15;
+    }
+    group init_steps {
+      steps.in       = 4'd0;
+      steps.write_en = 1'd1;
+      init_steps[done] = steps.done;
+    }
+    static<1> group upd_steps {
+      steps_add.left  = steps.out;
+      steps_add.right = 4'd1;
+      steps.in        = steps_add.out;
+      steps.write_en  = %0 ? 1'd1;
+    }
+    // pulse_array: drive all memory reads and wire the PE datapath.
+    // Because seq_mem has 1-cycle latency, the PEs consume data from
+    // the PREVIOUS iteration's address, giving correct skew alignment.
+    static<1> group pulse_array {
+      // ── Memory reads (addr = steps.out) ──────────────────────────
+      A0.addr0 = steps.out; A0.content_en = 1'd1;
+      A1.addr0 = steps.out; A1.content_en = 1'd1;
+      A2.addr0 = steps.out; A2.content_en = 1'd1;
+      A3.addr0 = steps.out; A3.content_en = 1'd1;
+      B0.addr0 = steps.out; B0.content_en = 1'd1;
+      B1.addr0 = steps.out; B1.content_en = 1'd1;
+      B2.addr0 = steps.out; B2.content_en = 1'd1;
+      B3.addr0 = steps.out; B3.content_en = 1'd1;
+      // ── Row 0 ──────────────────────────────────────────────────────
+      pe_00.go   = %0 ? 1'd1;
+      pe_00.left = A0.read_data; pe_00.top = B0.read_data;
+      pe_01.go   = %0 ? 1'd1;
+      pe_01.left = pe_00.right; pe_01.top = B1.read_data;
+      pe_02.go   = %0 ? 1'd1;
+      pe_02.left = pe_01.right; pe_02.top = B2.read_data;
+      pe_03.go   = %0 ? 1'd1;
+      pe_03.left = pe_02.right; pe_03.top = B3.read_data;
+      // ── Row 1 ──────────────────────────────────────────────────────
+      pe_10.go   = %0 ? 1'd1;
+      pe_10.left = A1.read_data; pe_10.top = pe_00.bottom;
+      pe_11.go   = %0 ? 1'd1;
+      pe_11.left = pe_10.right; pe_11.top = pe_01.bottom;
+      pe_12.go   = %0 ? 1'd1;
+      pe_12.left = pe_11.right; pe_12.top = pe_02.bottom;
+      pe_13.go   = %0 ? 1'd1;
+      pe_13.left = pe_12.right; pe_13.top = pe_03.bottom;
+      // ── Row 2 ──────────────────────────────────────────────────────
+      pe_20.go   = %0 ? 1'd1;
+      pe_20.left = A2.read_data; pe_20.top = pe_10.bottom;
+      pe_21.go   = %0 ? 1'd1;
+      pe_21.left = pe_20.right; pe_21.top = pe_11.bottom;
+      pe_22.go   = %0 ? 1'd1;
+      pe_22.left = pe_21.right; pe_22.top = pe_12.bottom;
+      pe_23.go   = %0 ? 1'd1;
+      pe_23.left = pe_22.right; pe_23.top = pe_13.bottom;
+      // ── Row 3 ──────────────────────────────────────────────────────
+      pe_30.go   = %0 ? 1'd1;
+      pe_30.left = A3.read_data; pe_30.top = pe_20.bottom;
+      pe_31.go   = %0 ? 1'd1;
+      pe_31.left = pe_30.right; pe_31.top = pe_21.bottom;
+      pe_32.go   = %0 ? 1'd1;
+      pe_32.left = pe_31.right; pe_32.top = pe_22.bottom;
+      pe_33.go   = %0 ? 1'd1;
+      pe_33.left = pe_32.right; pe_33.top = pe_23.bottom;
+    }
+    // Write-back: after computation, copy each PE's acc_out to C_i[j].
+    // Row 0 → C0
+    group wb_c0j0 {
+      C0.addr0      = 2'd0;
+      C0.content_en = 1'd1;
+      C0.write_en   = 1'd1;
+      C0.write_data = pe_00.result;
+      wb_c0j0[done]     = C0.done;
+    }
+    group wb_c0j1 {
+      C0.addr0      = 2'd1;
+      C0.content_en = 1'd1;
+      C0.write_en   = 1'd1;
+      C0.write_data = pe_01.result;
+      wb_c0j1[done]     = C0.done;
+    }
+    group wb_c0j2 {
+      C0.addr0      = 2'd2;
+      C0.content_en = 1'd1;
+      C0.write_en   = 1'd1;
+      C0.write_data = pe_02.result;
+      wb_c0j2[done]     = C0.done;
+    }
+    group wb_c0j3 {
+      C0.addr0      = 2'd3;
+      C0.content_en = 1'd1;
+      C0.write_en   = 1'd1;
+      C0.write_data = pe_03.result;
+      wb_c0j3[done]     = C0.done;
+    }
+    // Row 1 → C1
+    group wb_c1j0 {
+      C1.addr0      = 2'd0;
+      C1.content_en = 1'd1;
+      C1.write_en   = 1'd1;
+      C1.write_data = pe_10.result;
+      wb_c1j0[done]     = C1.done;
+    }
+    group wb_c1j1 {
+      C1.addr0      = 2'd1;
+      C1.content_en = 1'd1;
+      C1.write_en   = 1'd1;
+      C1.write_data = pe_11.result;
+      wb_c1j1[done]     = C1.done;
+    }
+    group wb_c1j2 {
+      C1.addr0      = 2'd2;
+      C1.content_en = 1'd1;
+      C1.write_en   = 1'd1;
+      C1.write_data = pe_12.result;
+      wb_c1j2[done]     = C1.done;
+    }
+    group wb_c1j3 {
+      C1.addr0      = 2'd3;
+      C1.content_en = 1'd1;
+      C1.write_en   = 1'd1;
+      C1.write_data = pe_13.result;
+      wb_c1j3[done]     = C1.done;
+    }
+    // Row 2 → C2
+    group wb_c2j0 {
+      C2.addr0      = 2'd0;
+      C2.content_en = 1'd1;
+      C2.write_en   = 1'd1;
+      C2.write_data = pe_20.result;
+      wb_c2j0[done]     = C2.done;
+    }
+    group wb_c2j1 {
+      C2.addr0      = 2'd1;
+      C2.content_en = 1'd1;
+      C2.write_en   = 1'd1;
+      C2.write_data = pe_21.result;
+      wb_c2j1[done]     = C2.done;
+    }
+    group wb_c2j2 {
+      C2.addr0      = 2'd2;
+      C2.content_en = 1'd1;
+      C2.write_en   = 1'd1;
+      C2.write_data = pe_22.result;
+      wb_c2j2[done]     = C2.done;
+    }
+    group wb_c2j3 {
+      C2.addr0      = 2'd3;
+      C2.content_en = 1'd1;
+      C2.write_en   = 1'd1;
+      C2.write_data = pe_23.result;
+      wb_c2j3[done]     = C2.done;
+    }
+    // Row 3 → C3
+    group wb_c3j0 {
+      C3.addr0      = 2'd0;
+      C3.content_en = 1'd1;
+      C3.write_en   = 1'd1;
+      C3.write_data = pe_30.result;
+      wb_c3j0[done]     = C3.done;
+    }
+    group wb_c3j1 {
+      C3.addr0      = 2'd1;
+      C3.content_en = 1'd1;
+      C3.write_en   = 1'd1;
+      C3.write_data = pe_31.result;
+      wb_c3j1[done]     = C3.done;
+    }
+    group wb_c3j2 {
+      C3.addr0      = 2'd2;
+      C3.content_en = 1'd1;
+      C3.write_en   = 1'd1;
+      C3.write_data = pe_32.result;
+      wb_c3j2[done]     = C3.done;
+    }
+    group wb_c3j3 {
+      C3.addr0      = 2'd3;
+      C3.content_en = 1'd1;
+      C3.write_en   = 1'd1;
+      C3.write_data = pe_33.result;
+      wb_c3j3[done]     = C3.done;
+    }
+  }
+  control {
+    seq {
+      init_steps;
+      while lt15.out with cond_steps {
+        static seq { pulse_array; upd_steps; }
+      }
+      // Write all 16 accumulator values into C memories.
+      // Writes within each C_i must be sequential (single-port memory).
+      // Writes to different C memories are independent → use par.
+      par { wb_c0j0; wb_c1j0; wb_c2j0; wb_c3j0; }
+      par { wb_c0j1; wb_c1j1; wb_c2j1; wb_c3j1; }
+      par { wb_c0j2; wb_c1j2; wb_c2j2; wb_c3j2; }
+      par { wb_c0j3; wb_c1j3; wb_c2j3; wb_c3j3; }
+    }
+  }
+}

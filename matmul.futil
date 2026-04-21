@@ -1,0 +1,166 @@
+import "primitives/core.futil";
+import "primitives/binary_operators.futil";
+import "primitives/memories/seq.futil";
+
+component main() -> () {
+  cells {
+    // 2D memories for A, B, C: 32-bit wide, 4x4 entries, 3-bit indices
+    @external A = seq_mem_d2(32, 4, 4, 3, 3);
+    @external B = seq_mem_d2(32, 4, 4, 3, 3);
+    @external C = seq_mem_d2(32, 4, 4, 3, 3);
+
+    // 3-bit loop counter registers
+    i = std_reg(3);
+    j = std_reg(3);
+    k = std_reg(3);
+
+    // 32-bit arithmetic units
+    add       = std_add(32);
+    mult_pipe = std_mult_pipe(32);
+
+    // 32-bit register to latch mult_pipe output before accumulation
+    mac_reg = std_reg(32);
+
+    // 3-bit units for index arithmetic and loop-bound checks
+    idx_add = std_add(3);
+    // Separate comparators per loop level: the compiler flags lt.left as a
+    // structural conflict when one shared lt is used in nested while conditions,
+    // because comb groups for outer and inner conditions share activation scope.
+    lt_i = std_lt(3);
+    lt_j = std_lt(3);
+    lt_k = std_lt(3);
+  }
+  wires {
+    // ── Loop counter initialisation ──────────────────────────────────────────
+    group init_i {
+      i.in = 3'd0;
+      i.write_en = 1'd1;
+      init_i[done] = i.done;
+    }
+    group init_j {
+      j.in = 3'd0;
+      j.write_en = 1'd1;
+      init_j[done] = j.done;
+    }
+    group init_k {
+      k.in = 3'd0;
+      k.write_en = 1'd1;
+      init_k[done] = k.done;
+    }
+
+    // ── Loop-bound combinational checks (i/j/k < 4) ─────────────────────────
+    comb group cond_i {
+      lt_i.left  = i.out;
+      lt_i.right = 3'd4;
+    }
+    comb group cond_j {
+      lt_j.left  = j.out;
+      lt_j.right = 3'd4;
+    }
+    comb group cond_k {
+      lt_k.left  = k.out;
+      lt_k.right = 3'd4;
+    }
+
+    // ── Loop counter increment ────────────────────────────────────────────────
+    // idx_add is shared; only one upd group is active at a time.
+    group upd_i {
+      idx_add.left  = i.out;
+      idx_add.right = 3'd1;
+      i.in       = idx_add.out;
+      i.write_en = 1'd1;
+      upd_i[done] = i.done;
+    }
+    group upd_j {
+      idx_add.left  = j.out;
+      idx_add.right = 3'd1;
+      j.in       = idx_add.out;
+      j.write_en = 1'd1;
+      upd_j[done] = j.done;
+    }
+    group upd_k {
+      idx_add.left  = k.out;
+      idx_add.right = 3'd1;
+      k.in       = idx_add.out;
+      k.write_en = 1'd1;
+      upd_k[done] = k.done;
+    }
+
+    // ── Multiply: mac_reg = A[i][k] * B[k][j] ────────────────────────────────
+    // seq_mem_d2 needs one cycle to complete a read (@interval(1)).
+    // We drive content_en=1 continuously; done pulses once the read lands.
+    // All three mult_pipe write_together(1) ports (go, left, right) are
+    // guarded on the same condition so the constraint is always satisfied.
+    group do_mult {
+      // Initiate reads on A and B (write_together(1): addr0, addr1, content_en)
+      A.addr0      = i.out;
+      A.addr1      = k.out;
+      A.content_en = 1'd1;
+      B.addr0      = k.out;
+      B.addr1      = j.out;
+      B.content_en = 1'd1;
+
+      // Fire multiplier when both reads are done.
+      // All three write_together(1) ports share the same guard.
+      mult_pipe.left  = A.done & B.done ? A.read_data;
+      mult_pipe.right = A.done & B.done ? B.read_data;
+      mult_pipe.go    = A.done & B.done ? 1'd1;
+
+      // Latch result (mac_reg write_together: in and write_en must pair).
+      mac_reg.in       = mult_pipe.out;
+      mac_reg.write_en = mult_pipe.done;
+
+      do_mult[done] = mac_reg.done;
+    }
+
+    // ── Read C[i][j] into the stable read_data port ───────────────────────────
+    // seq_mem_d2 has a single done port for both reads and writes, so we must
+    // separate the read and write-back into two sequential groups.
+    group read_c {
+      C.addr0      = i.out;
+      C.addr1      = j.out;
+      C.content_en = 1'd1;
+      read_c[done] = C.done;
+    }
+
+    // ── Accumulate and write back: C[i][j] += mac_reg ────────────────────────
+    // C.read_data is @stable, so it retains the value from read_c above.
+    // We issue a write (content_en=1, write_en=1).
+    // write_together(2) requires write_en and write_data to be assigned together.
+    group do_add {
+      C.addr0      = i.out;
+      C.addr1      = j.out;
+      add.left     = C.read_data;
+      add.right    = mac_reg.out;
+      C.content_en = 1'd1;
+      C.write_en   = 1'd1;
+      C.write_data = add.out;
+      do_add[done] = C.done;
+    }
+  }
+  control {
+    seq {
+      init_i;
+      while lt_i.out with cond_i {
+        seq {
+          init_j;
+          while lt_j.out with cond_j {
+            seq {
+              init_k;
+              while lt_k.out with cond_k {
+                seq {
+                  do_mult;
+                  read_c;
+                  do_add;
+                  upd_k;
+                }
+              }
+              upd_j;
+            }
+          }
+          upd_i;
+        }
+      }
+    }
+  }
+}

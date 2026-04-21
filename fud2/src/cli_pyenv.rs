@@ -130,8 +130,9 @@ pub enum Fud2CliExt {
 impl CliExt for Fud2CliExt {
     fn inner_command_info() -> Vec<CommandInfo> {
         vec![CommandInfo {
-            name: "env",
-            description: "manage the fud2 python environment",
+            name: "pyenv",
+            description: "Run a python script in an isolated environment",
+            short: &'p',
         }]
     }
 
